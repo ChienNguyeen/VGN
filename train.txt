@@ -1,0 +1,16 @@
+data/STARE/images/im0163
+data/STARE/images/im0235
+data/STARE/images/im0002
+data/STARE/images/im0082
+data/STARE/images/im0004
+data/STARE/images/im0005
+data/STARE/images/im0162
+data/STARE/images/im0001
+data/STARE/images/im0239
+data/STARE/images/im0044
+data/STARE/images/im0077
+data/STARE/images/im0319
+data/STARE/images/im0324
+data/STARE/images/im0081
+data/STARE/images/im0003
+data/STARE/images/im0240
