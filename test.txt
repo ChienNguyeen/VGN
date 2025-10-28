@@ -1,4 +1,4 @@
-data/DRIVE/images/im0291
-data/DRIVE/images/im0319
-data/DRIVE/images/im0004
-data/DRIVE/images/im0255
+../data/DRIVE/images/im0291
+../data/DRIVE/images/im0319
+../data/DRIVE/images/im0004
+../data/DRIVE/images/im0255
