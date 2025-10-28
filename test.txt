@@ -1,4 +1,4 @@
-data/STARE/images/im0291
-data/STARE/images/im0319
-data/STARE/images/im0004
-data/STARE/images/im0255
+../data/STARE/images/im0291
+../data/STARE/images/im0319
+../data/STARE/images/im0004
+../data/STARE/images/im0255
