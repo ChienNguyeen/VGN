@@ -207,7 +207,7 @@ def _get_image_fov_blob(minibatch_db, is_training, use_padding=False):
         len_x = 592
     elif 'STARE' in minibatch_db[0]:
         im_ext = '.ppm'
-        label_ext = '.ah.ppm'
+        label_ext = '.mask.ppm'
         fov_ext = '_mask.png'
         pixel_mean = cfg.PIXEL_MEAN_STARE
         len_y = 704
