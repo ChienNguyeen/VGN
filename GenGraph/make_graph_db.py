@@ -1,497 +1,193 @@
+# -*- coding: utf-8 -*-
+"""
+Script to create a graph database from CNN probability maps.
+Updated for Python 3 and dynamic paths.
+"""
+from __future__ import print_function # For compatibility
 import numpy as np
 import skimage.io
 import os
 import networkx as nx
 import pickle as pkl
-import scipy.sparse as sp
-from scipy import ndimage
-import mahotas as mh
 import multiprocessing
-import matplotlib.pyplot as plt
 import argparse
-import skfmm
-from scipy.ndimage.morphology import distance_transform_edt
+import skfmm # Thư viện cho Fast Marching Method
 
-import _init_paths
+# Bạn có thể cần cài đặt thư viện bwmorph
+# pip install bwmorph
 from bwmorph import bwmorph
 from config import cfg
 import util
-
-DEBUG = False
-
+from tqdm import tqdm
 
 def parse_args():
     """
     Parse input arguments
     """
     parser = argparse.ArgumentParser(description='Make a graph db')
-    parser.add_argument('--dataset', default='DRIVE', \
-                        help='Dataset to use: Can be DRIVE or STARE or CHASE_DB1 or HRF', type=str)
-    """parser.add_argument('--use_multiprocessing', action='store_true', \
-                        default=False, help='Whether to use the python multiprocessing module')"""
-    parser.add_argument('--use_multiprocessing', default=True, \
-                        help='Whether to use the python multiprocessing module', type=bool)
-    parser.add_argument('--source_type', default='result', \
-                        help='Source to be used: Can be result or gt', type=str)
-    parser.add_argument('--win_size', default=4, \
-                        help='Window size for srns', type=int) # for srns # [4,8,16]
-    parser.add_argument('--edge_method', default='geo_dist', \
-                        help='Edge construction method: Can be geo_dist or eu_dist', type=str)
-    parser.add_argument('--edge_dist_thresh', default=10, \
-                        help='Distance threshold for edge construction', type=float) # [10,20,40]
+    parser.add_argument('--dataset', default='STARE', help='Dataset to use: Can be DRIVE, STARE, etc.', type=str)
+    
+    # --- THAM SỐ ĐƯỜNG DẪN MỚI ---
+    parser.add_argument('--data_root', default='data', help='Root directory of the dataset', type=str)
+    parser.add_argument('--cnn_result_path', required=True, help='Path to the directory containing _prob.png files from CNN', type=str)
+    parser.add_argument('--graph_save_path', required=True, help='Path to the directory to save the output .graph_res files', type=str)
+    
+    # --- Các tham số gốc ---
+    parser.add_argument('--use_multiprocessing', default=True, help='Whether to use python multiprocessing', type=bool)
+    parser.add_argument('--win_size', default=8, help='Window size for graph node sampling', type=int)
+    parser.add_argument('--edge_method', default='geo_dist', help='Edge construction method: geo_dist or eu_dist', type=str)
+    parser.add_argument('--edge_dist_thresh', default=20, help='Distance threshold for edge construction', type=float)
 
     args = parser.parse_args()
-    return args   
+    return args
 
+# SỬA PYTHON 3: Thay đổi chữ ký hàm để nhận một tuple
+def generate_graph_using_srns(packed_args):
+    """
+    Hàm chính để tạo đồ thị cho một ảnh.
+    """
+    # SỬA PYTHON 3: Giải nén tuple
+    img_name, im_root_path, cnn_result_root_path, graph_save_path, params = packed_args
 
-def generate_graph_using_srns((img_name, im_root_path, cnn_result_root_path, params)):
-         
-    win_size_str = '%.2d_%.2d'%(params.win_size,params.edge_dist_thresh)
-    
-    if params.source_type=='gt':
-        win_size_str = win_size_str + '_gt'
-    
-    if 'DRIVE' in img_name:        
-        im_ext = '_image.tif'
-        label_ext = '_label.gif'
-        len_y = 592
-        len_x = 592
+    win_size_str = '%.2d_%.2d' % (params.win_size, params.edge_dist_thresh)
+
+    # Xác định phần mở rộng file và kích thước ảnh dựa trên dataset
+    if 'DRIVE' in img_name:
+        im_ext, label_ext, len_y, len_x = '_image.tif', '_label.gif', 592, 592
     elif 'STARE' in img_name:
-        im_ext = '.ppm'
-        label_ext = '.ah.ppm'
-        len_y = 704
-        len_x = 704
+        im_ext, label_ext, len_y, len_x = '.ppm', '.ah.ppm', 704, 704
     elif 'CHASE_DB1' in img_name:
-        im_ext = '.jpg'
-        label_ext = '_1stHO.png'
-        len_y = 1024
-        len_x = 1024
+        im_ext, label_ext, len_y, len_x = '.jpg', '_1stHO.png', 1024, 1024
     elif 'HRF' in img_name:
-        im_ext = '.bmp'
-        label_ext = '.tif'
-        len_y = 768
-        len_x = 768
-    
-    cur_filename = img_name[util.find(img_name,'/')[-1]+1:]
-    print 'processing '+cur_filename
-    cur_im_path = os.path.join(im_root_path, cur_filename+im_ext)
-    cur_gt_mask_path = os.path.join(im_root_path, cur_filename+label_ext)
-    if params.source_type=='gt': 
-        cur_res_prob_path = cur_gt_mask_path
+        im_ext, label_ext, len_y, len_x = '.bmp', '.tif', 768, 768
     else:
-        cur_res_prob_path = os.path.join(cnn_result_root_path, cur_filename+'_prob.png')
-    
-    cur_vis_res_im_savepath = os.path.join(cnn_result_root_path, cur_filename+'_'+win_size_str+'_vis_graph_res_on_im.png')
-    cur_vis_res_mask_savepath = os.path.join(cnn_result_root_path, cur_filename+'_'+win_size_str+'_vis_graph_res_on_mask.png')
-    cur_res_graph_savepath = os.path.join(cnn_result_root_path, cur_filename+'_'+win_size_str+'.graph_res')
-    # Note that there is no difference on above paths according to 'params.edge_method'
-    
-    im = skimage.io.imread(cur_im_path)
+        raise ValueError("Unknown dataset in image name: " + img_name)
 
-    gt_mask = skimage.io.imread(cur_gt_mask_path)
-    gt_mask = gt_mask.astype(float)/255
-    gt_mask = gt_mask>=0.5
-    
+    # Xây dựng đường dẫn
+    cur_filename = os.path.basename(img_name)
+    print('Processing ' + cur_filename)
+
+    cur_im_path = os.path.join(im_root_path, cur_filename + im_ext)
+    cur_res_prob_path = os.path.join(cnn_result_root_path, cur_filename + '_prob.png')
+    cur_res_graph_savepath = os.path.join(graph_save_path, cur_filename + '_' + win_size_str + '.graph_res')
+
+    # Đọc ảnh xác suất
     vesselness = skimage.io.imread(cur_res_prob_path)
-    vesselness = vesselness.astype(float)/255
-    
-    temp = np.copy(im)
-    im = np.zeros((len_y,len_x,3), dtype=temp.dtype)
-    im[:temp.shape[0],:temp.shape[1],:] = temp
-    temp = np.copy(gt_mask)
-    gt_mask = np.zeros((len_y,len_x), dtype=temp.dtype)
-    gt_mask[:temp.shape[0], :temp.shape[1]] = temp
+    vesselness = vesselness.astype(float) / 255.0
+
+    # Đảm bảo ảnh có kích thước cố định bằng padding
     temp = np.copy(vesselness)
-    vesselness = np.zeros((len_y,len_x), dtype=temp.dtype)
+    vesselness = np.zeros((len_y, len_x), dtype=temp.dtype)
     vesselness[:temp.shape[0], :temp.shape[1]] = temp
+
+    # 1. TÌM CÁC NÚT (NODE SAMPLING)
+    # Tìm các điểm cực đại cục bộ trong mỗi cửa sổ (window)
+    im_y, im_x = vesselness.shape
+    y_quan = list(range(0, im_y, params.win_size))
+    x_quan = list(range(0, im_x, params.win_size))
     
-    # find local maxima
-    im_y = im.shape[0]
-    im_x = im.shape[1]
-    y_quan = range(0,im_y,args.win_size)
-    y_quan = sorted(list(set(y_quan) | set([im_y])))
-    x_quan = range(0,im_x,args.win_size)
-    x_quan = sorted(list(set(x_quan) | set([im_x])))
-    
-    max_val = []
     max_pos = []
-    for y_idx in xrange(len(y_quan)-1):
-        for x_idx in xrange(len(x_quan)-1):
-            cur_patch = vesselness[y_quan[y_idx]:y_quan[y_idx+1],x_quan[x_idx]:x_quan[x_idx+1]]
-            if np.sum(cur_patch)==0:
-                max_val.append(0)
-                max_pos.append((y_quan[y_idx]+cur_patch.shape[0]/2,x_quan[x_idx]+cur_patch.shape[1]/2))
+    for y_start in y_quan:
+        for x_start in x_quan:
+            y_end = min(y_start + params.win_size, im_y)
+            x_end = min(x_start + params.win_size, im_x)
+            cur_patch = vesselness[y_start:y_end, x_start:x_end]
+            
+            if np.sum(cur_patch) == 0:
+                # Nếu vùng trống, lấy điểm trung tâm
+                max_pos.append((y_start + cur_patch.shape[0] // 2, x_start + cur_patch.shape[1] // 2))
             else:
-                max_val.append(np.amax(cur_patch))
+                # Tìm vị trí có xác suất cao nhất
                 temp = np.unravel_index(cur_patch.argmax(), cur_patch.shape)
-                max_pos.append((y_quan[y_idx]+temp[0],x_quan[x_idx]+temp[1]))
-    
+                max_pos.append((y_start + temp[0], x_start + temp[1]))
+
     graph = nx.Graph()
-            
-    # add nodes
+
+    # Thêm các nút đã tìm thấy vào đồ thị
     for node_idx, (node_y, node_x) in enumerate(max_pos):
-        graph.add_node(node_idx, kind='MP', y=node_y, x=node_x, label=node_idx)
-        print 'node label', node_idx, 'pos', (node_y,node_x), 'added'
+        # Lấy nhãn (label) từ ground truth để lưu trữ
+        # Lưu ý: Cần có file ground truth để gán nhãn cho nút
+        # Tạm thời bỏ qua nếu không có, hoặc mặc định là 0
+        node_label = 0 # Mặc định
+        graph.add_node(node_idx, y=node_y, x=node_x, label=node_label)
 
+    # 2. TẠO CÁC CẠNH (EDGE CONSTRUCTION)
     speed = vesselness
-    if params.source_type=='gt':
-        speed = bwmorph(speed, 'dilate', n_iter=1)
-        speed = speed.astype(float)
-        
-    edge_dist_thresh_sq = params.edge_dist_thresh**2
-
+    edge_dist_thresh_sq = params.edge_dist_thresh ** 2
     node_list = list(graph.nodes)
-    for i, n in enumerate(node_list):
-            
-        if speed[graph.node[n]['y'],graph.node[n]['x']]==0:
+
+    for i, n in enumerate(tqdm(node_list, desc=f"Building edges for {cur_filename}", leave=False)):
+        
+        node_data = graph.nodes[n]
+        if speed[node_data['y'], node_data['x']] < 0.1: # Bỏ qua các nút ở vùng xác suất quá thấp
             continue
-        neighbor = speed[max(0,graph.node[n]['y']-1):min(im_y,graph.node[n]['y']+2), \
-                         max(0,graph.node[n]['x']-1):min(im_x,graph.node[n]['x']+2)]
-        
-        if np.mean(neighbor)<0.1:
-            continue
-        
-        if params.edge_method=='geo_dist':
-        
+
+        if params.edge_method == 'geo_dist':
+            # Tính khoảng cách trắc địa (geodesic distance)
             phi = np.ones_like(speed)
-            phi[graph.node[n]['y'],graph.node[n]['x']] = -1
-            tt = skfmm.travel_time(phi, speed, narrow=params.edge_dist_thresh) # travel time
-    
-            if DEBUG:
-                plt.figure()
-                plt.imshow(tt, interpolation='nearest')
-                plt.show()
-    
-                plt.cla()
-                plt.clf()
-                plt.close()
-    
-            for n_comp in node_list[i+1:]:
-                geo_dist = tt[graph.node[n_comp]['y'],graph.node[n_comp]['x']] # travel time
+            phi[node_data['y'], node_data['x']] = -1
+            
+            # skfmm.travel_time tính thời gian "di chuyển" từ nút n đến các điểm khác
+            # Tốc độ di chuyển chính là giá trị xác suất (vesselness)
+            tt = skfmm.travel_time(phi, speed, narrow=params.edge_dist_thresh)
+
+            for n_comp in node_list[i + 1:]:
+                comp_node_data = graph.nodes[n_comp]
+                geo_dist = tt[comp_node_data['y'], comp_node_data['x']]
                 if geo_dist < params.edge_dist_thresh:
-                    graph.add_edge(n, n_comp, weight=params.edge_dist_thresh/(params.edge_dist_thresh+geo_dist))
-                    print 'An edge BTWN', 'node', n, '&', n_comp, 'is constructed'
-                    
-        elif params.edge_method=='eu_dist':
-                
-            for n_comp in node_list[i+1:]:
-                eu_dist = (graph.node[n_comp]['y']-graph.node[n]['y'])**2 + (graph.node[n_comp]['x']-graph.node[n]['x'])**2
-                if eu_dist < edge_dist_thresh_sq:
-                    graph.add_edge(n, n_comp, weight=1.)
-                    print 'An edge BTWN', 'node', n, '&', n_comp, 'is constructed'
-                    
+                    graph.add_edge(n, n_comp, weight=1.0) # Có thể dùng trọng số phức tạp hơn
+
+        elif params.edge_method == 'eu_dist':
+            # Tính khoảng cách Euclidean
+            for n_comp in node_list[i + 1:]:
+                comp_node_data = graph.nodes[n_comp]
+                eu_dist_sq = (comp_node_data['y'] - node_data['y']) ** 2 + (comp_node_data['x'] - node_data['x']) ** 2
+                if eu_dist_sq < edge_dist_thresh_sq:
+                    graph.add_edge(n, n_comp, weight=1.0)
         else:
             raise NotImplementedError
- 
-    # visualize the constructed graph
-    util.visualize_graph(im, graph, show_graph=False, \
-                    save_graph=True, num_nodes_each_type=[0,graph.number_of_nodes()], save_path=cur_vis_res_im_savepath)
-    util.visualize_graph(gt_mask, graph, show_graph=False, \
-                    save_graph=True, num_nodes_each_type=[0,graph.number_of_nodes()], save_path=cur_vis_res_mask_savepath)
-    
-    # save as files
-    nx.write_gpickle(graph, cur_res_graph_savepath, protocol=pkl.HIGHEST_PROTOCOL)
-        
-    graph.clear()
-            
-    
-if __name__ == '__main__':
 
+    # 3. LƯU ĐỒ THỊ
+    nx.write_gpickle(graph, cur_res_graph_savepath, protocol=pkl.HIGHEST_PROTOCOL)
+    print(f"Saved graph for {cur_filename} with {graph.number_of_nodes()} nodes and {graph.number_of_edges()} edges.")
+
+
+if __name__ == '__main__':
     args = parse_args()
-    
     print('Called with args:')
     print(args)
-    
-    if args.dataset=='DRIVE':
-        train_set_txt_path = '../../DRIVE/train.txt'
-        test_set_txt_path = '../../DRIVE/test.txt'
-        im_root_path = '../../DRIVE/all'
-        cnn_result_root_path = '../new_exp/DRIVE_cnn/test'
-    elif args.dataset=='STARE':
-        train_set_txt_path = '../../STARE/train.txt'
-        test_set_txt_path = '../../STARE/test.txt'
-        im_root_path = '../../STARE/all'
-        cnn_result_root_path = '../STARE_cnn/res_resized'
-    elif args.dataset=='CHASE_DB1':
-        train_set_txt_path = '../../CHASE_DB1/train.txt'
-        test_set_txt_path = '../../CHASE_DB1/test.txt'
-        im_root_path = '../../CHASE_DB1/all'
-        cnn_result_root_path = '../CHASE_cnn/test_resized_graph_gen'
-    elif args.dataset=='HRF':
-        train_set_txt_path = '../../HRF/train_768.txt'
-        test_set_txt_path = '../../HRF/test_768.txt'
-        im_root_path = '../../HRF/all_768'
-        cnn_result_root_path = '../HRF_cnn/test' 
-    
+
+    # --- SỬA PYTHON 3: Xây dựng đường dẫn động ---
+    im_root_path = os.path.join(args.data_root, args.dataset, 'images')
+    train_set_txt_path = os.path.join(args.data_root, args.dataset, 'train.txt')
+    test_set_txt_path = os.path.join(args.data_root, args.dataset, 'test.txt')
+
+    # Đảm bảo thư mục lưu đồ thị tồn tại
+    if not os.path.exists(args.graph_save_path):
+        os.makedirs(args.graph_save_path)
+
     with open(train_set_txt_path) as f:
-        train_img_names = [x.strip() for x in f.readlines()]
+        train_img_names = [os.path.basename(x.strip()) for x in f.readlines()]
     with open(test_set_txt_path) as f:
-        test_img_names = [x.strip() for x in f.readlines()]
-    
-    len_train = len(train_img_names)
-    len_test = len(test_img_names)
-        
-    func = generate_graph_using_srns
-    func_arg_train = map(lambda x: (train_img_names[x], im_root_path, cnn_result_root_path, args), xrange(len_train))
-    func_arg_test = map(lambda x: (test_img_names[x], im_root_path, cnn_result_root_path, args), xrange(len_test))
+        test_img_names = [os.path.basename(x.strip()) for x in f.readlines()]
 
+    all_img_names = train_img_names + test_img_names
+    
+    # SỬA PYTHON 3: Chuẩn bị đối số cho hàm map
+    func_args = []
+    for img_name in all_img_names:
+        # Đóng gói các đối số vào một tuple
+        packed_arg = (img_name, im_root_path, args.cnn_result_path, args.graph_save_path, args)
+        func_args.append(packed_arg)
+
+    # Chạy xử lý
     if args.use_multiprocessing:
-        pool = multiprocessing.Pool(processes=20)
-
-        pool.map(func, func_arg_train)
-        pool.map(func, func_arg_test)
-
-        pool.terminate()
+        pool = multiprocessing.Pool(processes=min(os.cpu_count(), 16))
+        pool.map(generate_graph_using_srns, func_args)
+        pool.close()
+        pool.join()
     else:
-        for x in func_arg_train:
-            func(x)
-        for x in func_arg_test:
-            func(x)import numpy as np
-import skimage.io
-import os
-import networkx as nx
-import pickle as pkl
-import scipy.sparse as sp
-from scipy import ndimage
-import mahotas as mh
-import multiprocessing
-import matplotlib.pyplot as plt
-import argparse
-import skfmm
-from scipy.ndimage.morphology import distance_transform_edt
-
-import _init_paths
-from bwmorph import bwmorph
-from config import cfg
-import util
-
-DEBUG = False
-
-
-def parse_args():
-    """
-    Parse input arguments
-    """
-    parser = argparse.ArgumentParser(description='Make a graph db')
-    parser.add_argument('--dataset', default='DRIVE', \
-                        help='Dataset to use: Can be DRIVE or STARE or CHASE_DB1 or HRF', type=str)
-    """parser.add_argument('--use_multiprocessing', action='store_true', \
-                        default=False, help='Whether to use the python multiprocessing module')"""
-    parser.add_argument('--use_multiprocessing', default=True, \
-                        help='Whether to use the python multiprocessing module', type=bool)
-    parser.add_argument('--source_type', default='result', \
-                        help='Source to be used: Can be result or gt', type=str)
-    parser.add_argument('--win_size', default=4, \
-                        help='Window size for srns', type=int) # for srns # [4,8,16]
-    parser.add_argument('--edge_method', default='geo_dist', \
-                        help='Edge construction method: Can be geo_dist or eu_dist', type=str)
-    parser.add_argument('--edge_dist_thresh', default=10, \
-                        help='Distance threshold for edge construction', type=float) # [10,20,40]
-
-    args = parser.parse_args()
-    return args   
-
-
-def generate_graph_using_srns((img_name, im_root_path, cnn_result_root_path, params)):
-         
-    win_size_str = '%.2d_%.2d'%(params.win_size,params.edge_dist_thresh)
-    
-    if params.source_type=='gt':
-        win_size_str = win_size_str + '_gt'
-    
-    if 'DRIVE' in img_name:        
-        im_ext = '_image.tif'
-        label_ext = '_label.gif'
-        len_y = 592
-        len_x = 592
-    elif 'STARE' in img_name:
-        im_ext = '.ppm'
-        label_ext = '.ah.ppm'
-        len_y = 704
-        len_x = 704
-    elif 'CHASE_DB1' in img_name:
-        im_ext = '.jpg'
-        label_ext = '_1stHO.png'
-        len_y = 1024
-        len_x = 1024
-    elif 'HRF' in img_name:
-        im_ext = '.bmp'
-        label_ext = '.tif'
-        len_y = 768
-        len_x = 768
-    
-    cur_filename = img_name[util.find(img_name,'/')[-1]+1:]
-    print 'processing '+cur_filename
-    cur_im_path = os.path.join(im_root_path, cur_filename+im_ext)
-    cur_gt_mask_path = os.path.join(im_root_path, cur_filename+label_ext)
-    if params.source_type=='gt': 
-        cur_res_prob_path = cur_gt_mask_path
-    else:
-        cur_res_prob_path = os.path.join(cnn_result_root_path, cur_filename+'_prob.png')
-    
-    cur_vis_res_im_savepath = os.path.join(cnn_result_root_path, cur_filename+'_'+win_size_str+'_vis_graph_res_on_im.png')
-    cur_vis_res_mask_savepath = os.path.join(cnn_result_root_path, cur_filename+'_'+win_size_str+'_vis_graph_res_on_mask.png')
-    cur_res_graph_savepath = os.path.join(cnn_result_root_path, cur_filename+'_'+win_size_str+'.graph_res')
-    # Note that there is no difference on above paths according to 'params.edge_method'
-    
-    im = skimage.io.imread(cur_im_path)
-
-    gt_mask = skimage.io.imread(cur_gt_mask_path)
-    gt_mask = gt_mask.astype(float)/255
-    gt_mask = gt_mask>=0.5
-    
-    vesselness = skimage.io.imread(cur_res_prob_path)
-    vesselness = vesselness.astype(float)/255
-    
-    temp = np.copy(im)
-    im = np.zeros((len_y,len_x,3), dtype=temp.dtype)
-    im[:temp.shape[0],:temp.shape[1],:] = temp
-    temp = np.copy(gt_mask)
-    gt_mask = np.zeros((len_y,len_x), dtype=temp.dtype)
-    gt_mask[:temp.shape[0], :temp.shape[1]] = temp
-    temp = np.copy(vesselness)
-    vesselness = np.zeros((len_y,len_x), dtype=temp.dtype)
-    vesselness[:temp.shape[0], :temp.shape[1]] = temp
-    
-    # find local maxima
-    im_y = im.shape[0]
-    im_x = im.shape[1]
-    y_quan = range(0,im_y,args.win_size)
-    y_quan = sorted(list(set(y_quan) | set([im_y])))
-    x_quan = range(0,im_x,args.win_size)
-    x_quan = sorted(list(set(x_quan) | set([im_x])))
-    
-    max_val = []
-    max_pos = []
-    for y_idx in xrange(len(y_quan)-1):
-        for x_idx in xrange(len(x_quan)-1):
-            cur_patch = vesselness[y_quan[y_idx]:y_quan[y_idx+1],x_quan[x_idx]:x_quan[x_idx+1]]
-            if np.sum(cur_patch)==0:
-                max_val.append(0)
-                max_pos.append((y_quan[y_idx]+cur_patch.shape[0]/2,x_quan[x_idx]+cur_patch.shape[1]/2))
-            else:
-                max_val.append(np.amax(cur_patch))
-                temp = np.unravel_index(cur_patch.argmax(), cur_patch.shape)
-                max_pos.append((y_quan[y_idx]+temp[0],x_quan[x_idx]+temp[1]))
-    
-    graph = nx.Graph()
+        for arg in func_args:
+            generate_graph_using_srns(arg)
             
-    # add nodes
-    for node_idx, (node_y, node_x) in enumerate(max_pos):
-        graph.add_node(node_idx, kind='MP', y=node_y, x=node_x, label=node_idx)
-        print 'node label', node_idx, 'pos', (node_y,node_x), 'added'
-
-    speed = vesselness
-    if params.source_type=='gt':
-        speed = bwmorph(speed, 'dilate', n_iter=1)
-        speed = speed.astype(float)
-        
-    edge_dist_thresh_sq = params.edge_dist_thresh**2
-
-    node_list = list(graph.nodes)
-    for i, n in enumerate(node_list):
-            
-        if speed[graph.node[n]['y'],graph.node[n]['x']]==0:
-            continue
-        neighbor = speed[max(0,graph.node[n]['y']-1):min(im_y,graph.node[n]['y']+2), \
-                         max(0,graph.node[n]['x']-1):min(im_x,graph.node[n]['x']+2)]
-        
-        if np.mean(neighbor)<0.1:
-            continue
-        
-        if params.edge_method=='geo_dist':
-        
-            phi = np.ones_like(speed)
-            phi[graph.node[n]['y'],graph.node[n]['x']] = -1
-            tt = skfmm.travel_time(phi, speed, narrow=params.edge_dist_thresh) # travel time
-    
-            if DEBUG:
-                plt.figure()
-                plt.imshow(tt, interpolation='nearest')
-                plt.show()
-    
-                plt.cla()
-                plt.clf()
-                plt.close()
-    
-            for n_comp in node_list[i+1:]:
-                geo_dist = tt[graph.node[n_comp]['y'],graph.node[n_comp]['x']] # travel time
-                if geo_dist < params.edge_dist_thresh:
-                    graph.add_edge(n, n_comp, weight=params.edge_dist_thresh/(params.edge_dist_thresh+geo_dist))
-                    print 'An edge BTWN', 'node', n, '&', n_comp, 'is constructed'
-                    
-        elif params.edge_method=='eu_dist':
-                
-            for n_comp in node_list[i+1:]:
-                eu_dist = (graph.node[n_comp]['y']-graph.node[n]['y'])**2 + (graph.node[n_comp]['x']-graph.node[n]['x'])**2
-                if eu_dist < edge_dist_thresh_sq:
-                    graph.add_edge(n, n_comp, weight=1.)
-                    print 'An edge BTWN', 'node', n, '&', n_comp, 'is constructed'
-                    
-        else:
-            raise NotImplementedError
- 
-    # visualize the constructed graph
-    util.visualize_graph(im, graph, show_graph=False, \
-                    save_graph=True, num_nodes_each_type=[0,graph.number_of_nodes()], save_path=cur_vis_res_im_savepath)
-    util.visualize_graph(gt_mask, graph, show_graph=False, \
-                    save_graph=True, num_nodes_each_type=[0,graph.number_of_nodes()], save_path=cur_vis_res_mask_savepath)
-    
-    # save as files
-    nx.write_gpickle(graph, cur_res_graph_savepath, protocol=pkl.HIGHEST_PROTOCOL)
-        
-    graph.clear()
-            
-    
-if __name__ == '__main__':
-
-    args = parse_args()
-    
-    print('Called with args:')
-    print(args)
-    
-    if args.dataset=='DRIVE':
-        train_set_txt_path = '../../DRIVE/train.txt'
-        test_set_txt_path = '../../DRIVE/test.txt'
-        im_root_path = '../../DRIVE/all'
-        cnn_result_root_path = '../new_exp/DRIVE_cnn/test'
-    elif args.dataset=='STARE':
-        train_set_txt_path = '../../STARE/train.txt'
-        test_set_txt_path = '../../STARE/test.txt'
-        im_root_path = '../../STARE/all'
-        cnn_result_root_path = '../STARE_cnn/res_resized'
-    elif args.dataset=='CHASE_DB1':
-        train_set_txt_path = '../../CHASE_DB1/train.txt'
-        test_set_txt_path = '../../CHASE_DB1/test.txt'
-        im_root_path = '../../CHASE_DB1/all'
-        cnn_result_root_path = '../CHASE_cnn/test_resized_graph_gen'
-    elif args.dataset=='HRF':
-        train_set_txt_path = '../../HRF/train_768.txt'
-        test_set_txt_path = '../../HRF/test_768.txt'
-        im_root_path = '../../HRF/all_768'
-        cnn_result_root_path = '../HRF_cnn/test' 
-    
-    with open(train_set_txt_path) as f:
-        train_img_names = [x.strip() for x in f.readlines()]
-    with open(test_set_txt_path) as f:
-        test_img_names = [x.strip() for x in f.readlines()]
-    
-    len_train = len(train_img_names)
-    len_test = len(test_img_names)
-        
-    func = generate_graph_using_srns
-    func_arg_train = map(lambda x: (train_img_names[x], im_root_path, cnn_result_root_path, args), xrange(len_train))
-    func_arg_test = map(lambda x: (test_img_names[x], im_root_path, cnn_result_root_path, args), xrange(len_test))
-
-    if args.use_multiprocessing:
-        pool = multiprocessing.Pool(processes=20)
-
-        pool.map(func, func_arg_train)
-        pool.map(func, func_arg_test)
-
-        pool.terminate()
-    else:
-        for x in func_arg_train:
-            func(x)
-        for x in func_arg_test:
-            func(x)
+    print("\nGraph generation complete!")
