@@ -6,9 +6,9 @@ from tqdm import tqdm
 
 # --- CẤU HÌNH ---
 # Đường dẫn đến thư mục chứa ảnh .ppm của bạn
-SRC_IMG_DIR = "data/STARE/images/"
+SRC_IMG_DIR = "../data/STARE/images/"
 # Nơi lưu các tệp mask (nên là cùng thư mục)
-DST_MASK_DIR = "data/STARE/images/"
+DST_MASK_DIR = "../data/STARE/images/"
 # Ngưỡng pixel để phân biệt FOV với nền đen
 # Bạn có thể cần điều chỉnh giá trị này (vd: 10, 15, 20)
 THRESHOLD_VALUE = 15
